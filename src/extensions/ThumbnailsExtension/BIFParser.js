@@ -1,4 +1,4 @@
-// BIF Parser from https://github.com/chemoish/videojs-bif/blob/master/src/parser.js
+// Base BIF Parser from https://github.com/chemoish/videojs-bif/blob/master/src/parser.js
 // LICENSE: https://github.com/chemoish/videojs-bif/blob/master/LICENSE
 
 import jDataView from 'jdataview';
@@ -6,7 +6,6 @@ import jDataView from 'jdataview';
 // Offsets
 
 export const BIF_INDEX_OFFSET = 64;
-export const FRAMEWISE_SEPARATION_OFFSET = 16;
 export const NUMBER_OF_BIF_IMAGES_OFFSET = 12;
 export const VERSION_OFFSET = 8;
 
@@ -51,7 +50,7 @@ function validate(magicNumber) {
  *
  * @param {ArrayBuffer} arrayBuffer
  */
-export class BIFParser {
+export default class BIFParser {
   constructor(arrayBuffer) {
     // Magic Number
     // SEE: https://sdkdocs.roku.com/display/sdkdoc/Trick+Mode+Support#TrickModeSupport-MagicNumber
@@ -64,19 +63,26 @@ export class BIFParser {
     this.arrayBuffer = arrayBuffer;
     this.data = new jDataView(arrayBuffer); // eslint-disable-line new-cap
 
-    // Framewise Separation
-    // SEE: https://sdkdocs.roku.com/display/sdkdoc/Trick+Mode+Support#TrickModeSupport-FramewiseSeparation
-    this.framewiseSeparation = this.data.getUint32(FRAMEWISE_SEPARATION_OFFSET, true) || 1000;
-
     // Number of BIF images
     // SEE: https://sdkdocs.roku.com/display/sdkdoc/Trick+Mode+Support#TrickModeSupport-NumberofBIFimages
-    this.numberOfBIFImages = this.data.getUint32(NUMBER_OF_BIF_IMAGES_OFFSET, true);
+    this.numberOfBIFImages = this.data.getUint32(
+      NUMBER_OF_BIF_IMAGES_OFFSET,
+      true,
+    );
 
     // Version
     // SEE: https://sdkdocs.roku.com/display/sdkdoc/Trick+Mode+Support#TrickModeSupport-Version
     this.version = this.data.getUint32(VERSION_OFFSET, true);
 
     this.bifIndex = this.generateBIFIndex(true);
+
+    this.bifDimensions = { width: 240, height: 180 };
+
+    try {
+      this.getInitialImageDimensions();
+    } catch (e) {
+      console.warn('BIF Parser', e.stack);
+    }
   }
 
   /**
@@ -97,7 +103,8 @@ export class BIFParser {
       const bifIndexEntryTimestampOffset = bifIndexEntryOffset;
       const bifIndexEntryAbsoluteOffset = bifIndexEntryOffset + 4;
 
-      const nextBifIndexEntryAbsoluteOffset = bifIndexEntryAbsoluteOffset + BIF_INDEX_ENTRY_LENGTH;
+      const nextBifIndexEntryAbsoluteOffset =
+        bifIndexEntryAbsoluteOffset + BIF_INDEX_ENTRY_LENGTH;
 
       // Documented example, items within `[]`are used to generate the frame.
       // 64, 65, 66, 67 | 68, 69, 70, 71
@@ -105,18 +112,48 @@ export class BIFParser {
       // 72, 73, 74, 75 | 76, 77, 78, 79
       // Frame 1 timestamp | [absolute offset of frame]
       const offset = this.data.getUint32(bifIndexEntryAbsoluteOffset, true);
-      const nextOffset = this.data.getUint32(nextBifIndexEntryAbsoluteOffset, true);
+      const nextOffset = this.data.getUint32(
+        nextBifIndexEntryAbsoluteOffset,
+        true,
+      );
       const timestamp = this.data.getUint32(bifIndexEntryTimestampOffset, true);
 
       bifIndex.push({
         offset,
         timestamp,
-
         length: nextOffset - offset,
       });
     }
-
     return bifIndex;
+  }
+
+  /**
+   * Return image dimension data for a specific image source
+   *
+   * @returns {object} Promise
+   */
+  getInitialImageDimensions() {
+    const image = 'data:image/jpeg;base64,';
+    const src = `${image}${btoa(
+      String.fromCharCode.apply(
+        null,
+        new Uint8Array(
+          this.arrayBuffer.slice(
+            this.bifIndex[0].offset,
+            this.bifIndex[0].offset + this.bifIndex[0].length,
+          ),
+        ),
+      ),
+    )}`;
+    const img = new Image();
+    img.src = src;
+    img.onload = () => {
+      if (!img.width || !img.height) throw 'Missing image dimensions';
+      this.bifDimensions = {
+        width: img.width,
+        height: img.height,
+      };
+    };
   }
 
   /**
@@ -128,21 +165,32 @@ export class BIFParser {
   getImageDataAtSecond(second) {
     const image = 'data:image/jpeg;base64,';
 
-    // since frames are defined at an interval of `this.framewiseSeparation`,
-    // we need to convert the time into an appropriate frame number.
-    const frameNumber = Math.floor(second / (this.framewiseSeparation / 1000));
-
-    const frame = this.bifIndex[frameNumber];
-
-    console.log({frame});
+    const frame = this.bifIndex.find(bif => {
+      return bif.timestamp / 1000 > second;
+    });
 
     if (!frame) {
       return image;
     }
 
-    return `${image}${btoa(String.fromCharCode.apply(null,
-      new Uint8Array(this.arrayBuffer.slice(frame.offset, frame.offset + frame.length))
-    ))}`;
+    const src = `${image}${btoa(
+      String.fromCharCode.apply(
+        null,
+        new Uint8Array(
+          this.arrayBuffer.slice(frame.offset, frame.offset + frame.length),
+        ),
+      ),
+    )}`;
+
+    // Build our image object using image dimensions and our newest source
+    return {
+      start: frame.timestamp / 1000,
+      src,
+      x: 0,
+      y: 0,
+      width: this.bifDimensions.width,
+      height: this.bifDimensions.height,
+    };
   }
 
   /**
@@ -157,13 +205,18 @@ export class BIFParser {
 
       images.push({
         start: frame.timestamp / 1000,
-        src: `${image}${btoa(String.fromCharCode.apply(null,
-            new Uint8Array(this.arrayBuffer.slice(frame.offset, frame.offset + frame.length))
-          ))}`,
+        src: `${image}${btoa(
+          String.fromCharCode.apply(
+            null,
+            new Uint8Array(
+              this.arrayBuffer.slice(frame.offset, frame.offset + frame.length),
+            ),
+          ),
+        )}`,
         x: 0,
         y: 0,
-        width: 240,
-        height: 145
+        width: this.bifDimensions.width,
+        height: this.bifDimensions.height,
       });
     });
     return images;

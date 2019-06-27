@@ -1,6 +1,6 @@
 import { Module } from '@src/Module';
-import { Events, IEventData, IInstance, IThumbnail } from '@src/types';
-import { BIFParser as BIFParserClass } from './ThumbnailsExtensionBifParser';
+import { IInstance, IThumbnail } from '@src/types';
+import BIFParser from './BIFParser';
 import parse from 'url-parse';
 import vttToJson from 'vtt-to-json';
 
@@ -8,6 +8,10 @@ export class ThumbnailsExtension extends Module {
   public name: string = 'ThumbnailsExtension';
 
   private thumbnails: IThumbnail[] = [];
+
+  private extension: string = '';
+
+  private bifParser: BIFParser;
 
   constructor(instance: IInstance) {
     super(instance);
@@ -46,40 +50,37 @@ export class ThumbnailsExtension extends Module {
     const response = await fetch(file);
     const data = await response.arrayBuffer();
 
-    const BifParser = new BIFParserClass(data);
-    const imgs = BifParser.getImageData();
-
-    this.thumbnails = imgs
-      .map(item => {
-        const { start, src, x, y, width, height } = item;
-        return {
-          start,
-          src,
-          x,
-          y,
-          width,
-          height,
-        };
-      })
-      .sort((a, b) => b.start - a.start);
+    // Since we already have functionality to grab the bif image that we
+    // need at a given second, we are only prepping the parser class and
+    // do not need to create an array of thumbs
+    this.bifParser = new BIFParser(data);
   }
 
   public async load() {
     const file = this.instance.config.thumbnails.src;
-    // Get the file extension for conditional processing
-    const ext = file.split(".").pop();
 
-    if (ext === "vtt") {
+    // Get the file extension for conditional processing
+    this.extension = file.split('.').pop();
+
+    if (this.extension === 'vtt') {
       this.loadVttThumbs(file);
-    } else if (ext === "bif") {
+    } else if (this.extension === 'bif') {
       this.loadBifThumbs(file);
     } else {
       // We shouldn't get here, but still
-      console.warn("Invalid file type passed for thumbnails. Acceptable file types: vtt, bif");
+      this.instance.log('ThumbnailsExtension')(
+        'Invalid file type passed for thumbnails. Acceptable file types: vtt, bif',
+      );
     }
   }
 
   public getThumbnail(seconds: number): IThumbnail {
-    return this.thumbnails.find(thumbnail => thumbnail.start <= seconds);
+    if (this.extension === 'vtt') {
+      return this.thumbnails.find(thumbnail => thumbnail.start <= seconds);
+    } else if (this.extension === 'bif') {
+      return this.bifParser.getImageDataAtSecond(seconds);
+    } else {
+      return null;
+    }
   }
 }
